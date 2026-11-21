@@ -1,0 +1,780 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import {
+  BookingSession,
+  PaymentTransaction,
+  NotificationItem,
+  ChatThread,
+  ChatMessage,
+  ReviewItem,
+  SimulatedEmail,
+  UserProfile,
+  PaymentMethod,
+  SessionStatus
+} from '../types';
+import {
+  INITIAL_SESSIONS,
+  INITIAL_TRANSACTIONS,
+  INITIAL_NOTIFICATIONS,
+  INITIAL_CHATS,
+  INITIAL_MESSAGES,
+  INITIAL_REVIEWS,
+  INITIAL_EMAILS
+} from '../data/initialData';
+import { useAuth } from './AuthContext';
+import { collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase/config';
+
+interface AppContextType {
+  sessions: BookingSession[];
+  transactions: PaymentTransaction[];
+  notifications: NotificationItem[];
+  chats: ChatThread[];
+  messages: ChatMessage[];
+  reviews: ReviewItem[];
+  emails: SimulatedEmail[];
+  
+  // Actions
+  createBooking: (bookingData: {
+    tutorId: string;
+    tutorName: string;
+    tutorAvatar?: string;
+    subject: string;
+    academicLevel: string;
+    date: string;
+    time: string;
+    durationHours: number;
+    pricePula: number;
+    paymentMethod?: PaymentMethod;
+    mobileNumber?: string;
+    meetingMode: 'Online' | 'In-person';
+    notes?: string;
+  }) => { success: boolean; session?: BookingSession; transaction?: PaymentTransaction; error?: string };
+
+  updateSessionStatus: (sessionId: string, newStatus: SessionStatus) => void;
+  rescheduleSession: (sessionId: string, newDate: string, newTime: string) => void;
+  completeSessionAndReleaseEscrow: (sessionId: string) => void;
+  
+  // Reviews
+  addReview: (reviewData: {
+    sessionId: string;
+    tutorId: string;
+    rating: number;
+    comment: string;
+    subject: string;
+  }) => void;
+
+  // Messaging
+  sendMessage: (chatId: string, recipientId: string, content: string) => void;
+  getOrCreateChat: (studentId: string, tutorId: string, studentName: string, tutorName: string, studentAvatar?: string, tutorAvatar?: string) => ChatThread;
+  markChatAsRead: (chatId: string) => void;
+
+  // Notifications
+  markNotifAsRead: (id: string) => void;
+  clearAllNotifs: () => void;
+
+  // Admin Actions
+  approveTutorVerification: (tutorId: string) => void;
+  rejectTutorVerification: (tutorId: string, reason: string) => void;
+  suspendUserAccount: (userId: string) => void;
+  activateUserAccount: (userId: string) => void;
+  closeUserAccount: (userId: string) => void;
+
+  // Search & Filters state
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
+  selectedSubject: string;
+  setSelectedSubject: (subject: string) => void;
+  selectedLevel: string;
+  setSelectedLevel: (level: string) => void;
+  selectedLocation: string;
+  setSelectedLocation: (loc: string) => void;
+  priceRange: number;
+  setPriceRange: (price: number) => void;
+  
+  // Active UI Modals / Drawers
+  isEmailDrawerOpen: boolean;
+  setIsEmailDrawerOpen: (open: boolean) => void;
+  isShortcutsModalOpen: boolean;
+  setIsShortcutsModalOpen: (open: boolean) => void;
+  activeChatUser: { id: string; name: string; avatar?: string } | null;
+  setActiveChatUser: (user: { id: string; name: string; avatar?: string } | null) => void;
+  
+  // Daily.co Virtual Classroom Session Modal
+  activeDailySession: {
+    sessionId: string;
+    subject: string;
+    tutorName: string;
+    studentName: string;
+    videoCallUrl?: string;
+    pricePula?: number;
+  } | null;
+  setActiveDailySession: (session: {
+    sessionId: string;
+    subject: string;
+    tutorName: string;
+    studentName: string;
+    videoCallUrl?: string;
+    pricePula?: number;
+  } | null) => void;
+}
+
+const AppContext = createContext<AppContextType | undefined>(undefined);
+
+export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { currentUser, updateUserProfile, users } = useAuth();
+
+  const [sessions, setSessions] = useState<BookingSession[]>(() => {
+    const saved = localStorage.getItem('learnlink_sessions');
+    return saved ? JSON.parse(saved) : INITIAL_SESSIONS;
+  });
+
+  const [transactions, setTransactions] = useState<PaymentTransaction[]>(() => {
+    const saved = localStorage.getItem('learnlink_transactions');
+    return saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
+  });
+
+  const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
+    const saved = localStorage.getItem('learnlink_notifications');
+    return saved ? JSON.parse(saved) : INITIAL_NOTIFICATIONS;
+  });
+
+  const [chats, setChats] = useState<ChatThread[]>(() => {
+    const saved = localStorage.getItem('learnlink_chats');
+    return saved ? JSON.parse(saved) : INITIAL_CHATS;
+  });
+
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    const saved = localStorage.getItem('learnlink_messages');
+    return saved ? JSON.parse(saved) : INITIAL_MESSAGES;
+  });
+
+  const [reviews, setReviews] = useState<ReviewItem[]>(() => {
+    const saved = localStorage.getItem('learnlink_reviews');
+    return saved ? JSON.parse(saved) : INITIAL_REVIEWS;
+  });
+
+  const [emails, setEmails] = useState<SimulatedEmail[]>(() => {
+    const saved = localStorage.getItem('learnlink_emails');
+    return saved ? JSON.parse(saved) : INITIAL_EMAILS;
+  });
+
+  // Filter States
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedSubject, setSelectedSubject] = useState('All Subjects');
+  const [selectedLevel, setSelectedLevel] = useState('All Academic Levels');
+  const [selectedLocation, setSelectedLocation] = useState('All Locations');
+  const [priceRange, setPriceRange] = useState(300);
+
+  // UI Drawer states
+  const [isEmailDrawerOpen, setIsEmailDrawerOpen] = useState(false);
+  const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
+  const [activeChatUser, setActiveChatUser] = useState<{ id: string; name: string; avatar?: string } | null>(null);
+  const [activeDailySession, setActiveDailySession] = useState<{
+    sessionId: string;
+    subject: string;
+    tutorName: string;
+    studentName: string;
+    videoCallUrl?: string;
+    pricePula?: number;
+  } | null>(null);
+
+  // Persistence Effects (Local Backup + Firestore Cloud Real-Time Sync)
+  useEffect(() => { localStorage.setItem('learnlink_sessions', JSON.stringify(sessions)); }, [sessions]);
+  useEffect(() => { localStorage.setItem('learnlink_transactions', JSON.stringify(transactions)); }, [transactions]);
+  useEffect(() => { localStorage.setItem('learnlink_notifications', JSON.stringify(notifications)); }, [notifications]);
+  useEffect(() => { localStorage.setItem('learnlink_chats', JSON.stringify(chats)); }, [chats]);
+  useEffect(() => { localStorage.setItem('learnlink_messages', JSON.stringify(messages)); }, [messages]);
+  useEffect(() => { localStorage.setItem('learnlink_reviews', JSON.stringify(reviews)); }, [reviews]);
+  useEffect(() => { localStorage.setItem('learnlink_emails', JSON.stringify(emails)); }, [emails]);
+
+  // Firestore Cloud Synchronization Effects
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'sessions'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: BookingSession[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as BookingSession));
+          setSessions(prev => {
+            const map = new Map<string, BookingSession>();
+            INITIAL_SESSIONS.forEach(s => map.set(s.id, s));
+            prev.forEach(s => map.set(s.id, s));
+            remote.forEach(s => map.set(s.id, s));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore sessions listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'transactions'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: PaymentTransaction[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as PaymentTransaction));
+          setTransactions(prev => {
+            const map = new Map<string, PaymentTransaction>();
+            INITIAL_TRANSACTIONS.forEach(t => map.set(t.id, t));
+            prev.forEach(t => map.set(t.id, t));
+            remote.forEach(t => map.set(t.id, t));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore transactions listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'notifications'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: NotificationItem[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as NotificationItem));
+          setNotifications(prev => {
+            const map = new Map<string, NotificationItem>();
+            INITIAL_NOTIFICATIONS.forEach(n => map.set(n.id, n));
+            prev.forEach(n => map.set(n.id, n));
+            remote.forEach(n => map.set(n.id, n));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore notifications listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'chats'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: ChatThread[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as ChatThread));
+          setChats(prev => {
+            const map = new Map<string, ChatThread>();
+            INITIAL_CHATS.forEach(c => map.set(c.id, c));
+            prev.forEach(c => map.set(c.id, c));
+            remote.forEach(c => map.set(c.id, c));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore chats listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'messages'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: ChatMessage[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as ChatMessage));
+          setMessages(prev => {
+            const map = new Map<string, ChatMessage>();
+            INITIAL_MESSAGES.forEach(m => map.set(m.id, m));
+            prev.forEach(m => map.set(m.id, m));
+            remote.forEach(m => map.set(m.id, m));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore messages listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'reviews'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: ReviewItem[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as ReviewItem));
+          setReviews(prev => {
+            const map = new Map<string, ReviewItem>();
+            INITIAL_REVIEWS.forEach(r => map.set(r.id, r));
+            prev.forEach(r => map.set(r.id, r));
+            remote.forEach(r => map.set(r.id, r));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore reviews listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const unsub = onSnapshot(collection(db, 'emails'), snapshot => {
+        if (!snapshot.empty) {
+          const remote: SimulatedEmail[] = [];
+          snapshot.forEach(docSnap => remote.push(docSnap.data() as SimulatedEmail));
+          setEmails(prev => {
+            const map = new Map<string, SimulatedEmail>();
+            INITIAL_EMAILS.forEach(em => map.set(em.id, em));
+            prev.forEach(em => map.set(em.id, em));
+            remote.forEach(em => map.set(em.id, em));
+            return Array.from(map.values());
+          });
+        }
+      }, err => console.warn('Firestore emails listener notice:', err));
+      return () => unsub();
+    } catch (e) { console.warn('Firestore init notice:', e); }
+  }, []);
+
+  const addSimulatedEmail = (recipientEmail: string, recipientName: string, subject: string, body: string, triggerEvent: string) => {
+    const newEmail: SimulatedEmail = {
+      id: `em_${Date.now()}`,
+      recipientEmail,
+      recipientName,
+      subject,
+      body,
+      sentAt: new Date().toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+      triggerEvent
+    };
+    setEmails(prev => [newEmail, ...prev]);
+    try {
+      setDoc(doc(db, 'emails', newEmail.id), newEmail).catch(err => console.warn('Firestore email notice:', err));
+    } catch (e) { console.warn('Firestore write notice:', e); }
+  };
+
+  const addNotification = (userId: string, title: string, message: string, type: NotificationItem['type']) => {
+    const notif: NotificationItem = {
+      id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      userId,
+      title,
+      message,
+      type,
+      timestamp: 'Just now',
+      isRead: false
+    };
+    setNotifications(prev => [notif, ...prev]);
+    try {
+      setDoc(doc(db, 'notifications', notif.id), notif).catch(err => console.warn('Firestore notif notice:', err));
+    } catch (e) { console.warn('Firestore write notice:', e); }
+  };
+
+  const createBooking = (bookingData: {
+    tutorId: string;
+    tutorName: string;
+    tutorAvatar?: string;
+    subject: string;
+    academicLevel: string;
+    date: string;
+    time: string;
+    durationHours: number;
+    pricePula: number;
+    paymentMethod: PaymentMethod;
+    mobileNumber: string;
+    meetingMode: 'Online' | 'In-person';
+    notes?: string;
+  }) => {
+    if (!currentUser) return { success: false, error: 'You must be logged in to book a session.' };
+
+    const sessionId = `ses_${Date.now()}`;
+
+    const newSession: BookingSession = {
+      id: sessionId,
+      studentId: currentUser.id,
+      studentName: currentUser.fullName,
+      studentEmail: currentUser.email,
+      studentPhone: currentUser.phoneNumber,
+      tutorId: bookingData.tutorId,
+      tutorName: bookingData.tutorName,
+      tutorAvatar: bookingData.tutorAvatar,
+      subject: bookingData.subject,
+      academicLevel: bookingData.academicLevel,
+      date: bookingData.date,
+      time: bookingData.time,
+      durationHours: bookingData.durationHours,
+      pricePula: bookingData.pricePula,
+      status: 'pending',
+      paymentMethod: 'Direct',
+      escrowStatus: 'not_applicable',
+      meetingMode: bookingData.meetingMode,
+      videoCallUrl: bookingData.meetingMode === 'Online' ? `https://meet.jit.si/LearnLink_Classroom_${sessionId}#config.prejoinPageEnabled=false&config.disableDeepLinking=true` : undefined,
+      locationStr: bookingData.meetingMode === 'In-person' ? 'To be agreed with tutor' : undefined,
+      notes: bookingData.notes,
+      createdAt: new Date().toISOString().slice(0, 10)
+    };
+
+    setSessions(prev => [newSession, ...prev]);
+
+    try {
+      setDoc(doc(db, 'sessions', sessionId), newSession).catch(e => console.warn('Firestore session write:', e));
+    } catch (e) { console.warn('Firestore write notice:', e); }
+
+    // During the free launch period LearnLink does not hold or process any payment.
+    addNotification(
+      currentUser.id,
+      'Session Request Sent',
+      `Your ${bookingData.subject} request to ${bookingData.tutorName} was sent. Agree the time and payment directly with your tutor.`,
+      'booking'
+    );
+
+    // Tutor Notification
+    addNotification(
+      bookingData.tutorId,
+      'New Booking Request',
+      `${currentUser.fullName} requested a ${bookingData.subject} session (${bookingData.date} at ${bookingData.time}).`,
+      'booking'
+    );
+
+    return { success: true, session: newSession };
+  };
+
+  const updateSessionStatus = (sessionId: string, newStatus: SessionStatus) => {
+    setSessions(prev =>
+      prev.map(s => {
+        if (s.id !== sessionId) return s;
+        const updated = { ...s, status: newStatus };
+
+        try {
+          setDoc(doc(db, 'sessions', sessionId), updated, { merge: true }).catch(e => console.warn('Firestore session update:', e));
+        } catch (e) { console.warn('Firestore notice:', e); }
+
+        // Send notifications
+        if (newStatus === 'accepted') {
+          addNotification(
+            s.studentId,
+            'Session Confirmed!',
+            `${s.tutorName} accepted your booking request for ${s.subject} on ${s.date}.`,
+            'booking'
+          );
+          addSimulatedEmail(
+            s.studentEmail,
+            s.studentName,
+            `[LearnLink] Booking Confirmed with ${s.tutorName}`,
+            `Dumela ${s.studentName},\n\nGreat news! ${s.tutorName} accepted your session for ${s.subject} on ${s.date} (${s.time}).\n\nJoin URL: ${s.videoCallUrl || 'In-person location'}\n\nLearnLink Team`,
+            'booking_accepted'
+          );
+        } else if (newStatus === 'declined') {
+          addNotification(
+            s.studentId,
+            'Booking Request Declined',
+            `${s.tutorName} was unable to accept your session request for ${s.subject}. You can request another time or choose another tutor.`,
+            'booking'
+          );
+          addSimulatedEmail(
+            s.studentEmail,
+            s.studentName,
+            `[LearnLink] Booking Request Declined`,
+            `Dumela ${s.studentName},\n\n${s.tutorName} was unable to accept your request for ${s.subject}.\n\nYou can request another time or choose another tutor on LearnLink.\n\nLearnLink Team`,
+            'booking_declined'
+          );
+        }
+
+        return updated;
+      })
+    );
+  };
+
+  const rescheduleSession = (sessionId: string, newDate: string, newTime: string) => {
+    setSessions(prev =>
+      prev.map(s => {
+        if (s.id !== sessionId) return s;
+        const updated = { ...s, date: newDate, time: newTime, status: 'accepted' as SessionStatus };
+        try {
+          setDoc(doc(db, 'sessions', sessionId), updated, { merge: true }).catch(e => console.warn('Firestore session reschedule:', e));
+        } catch (e) { console.warn('Firestore notice:', e); }
+
+        addNotification(
+          s.tutorId,
+          'Session Rescheduled',
+          `${s.studentName} updated the session date to ${newDate} at ${newTime}.`,
+          'booking'
+        );
+        addNotification(
+          s.studentId,
+          'Session Rescheduled',
+          `Your ${s.subject} session has been updated to ${newDate} at ${newTime}.`,
+          'booking'
+        );
+        return updated;
+      })
+    );
+  };
+
+  // Marks a lesson as completed (no money is held or released by LearnLink during the free launch period).
+  const completeSessionAndReleaseEscrow = (sessionId: string) => {
+    const session = sessions.find(s => s.id === sessionId);
+    if (!session) return;
+
+    const updatedSession = { ...session, status: 'completed' as const, escrowStatus: 'not_applicable' as const };
+    setSessions(prev =>
+      prev.map(s => (s.id === sessionId ? updatedSession : s))
+    );
+    try { setDoc(doc(db, 'sessions', sessionId), updatedSession, { merge: true }).catch(e => console.warn('Firestore session complete:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+
+    addNotification(
+      session.studentId,
+      'Lesson Completed',
+      `Your lesson with ${session.tutorName} is complete. Please take a moment to rate and review your tutor.`,
+      'booking'
+    );
+    addNotification(
+      session.tutorId,
+      'Lesson Completed',
+      `Your lesson with ${session.studentName} was marked complete.`,
+      'booking'
+    );
+  };
+
+  const addReview = ({ sessionId, tutorId, rating, comment, subject }: { sessionId: string; tutorId: string; rating: number; comment: string; subject: string }) => {
+    if (!currentUser) return;
+
+    const newRev: ReviewItem = {
+      id: `rev_${Date.now()}`,
+      tutorId,
+      studentId: currentUser.id,
+      studentName: currentUser.fullName,
+      studentAvatar: currentUser.avatarUrl,
+      rating,
+      comment,
+      subject,
+      date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+    };
+
+    setReviews(prev => [newRev, ...prev]);
+    try { setDoc(doc(db, 'reviews', newRev.id), newRev).catch(e => console.warn('Firestore review write:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+
+    // Update session record
+    setSessions(prev => prev.map(s => {
+      if (s.id === sessionId) {
+        const updated = { ...s, ratingGiven: rating, reviewGiven: comment };
+        try { setDoc(doc(db, 'sessions', sessionId), updated, { merge: true }).catch(e => console.warn('Firestore session review update:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+        return updated;
+      }
+      return s;
+    }));
+
+    // Recalculate tutor rating & review count
+    const tutorRevs = [...reviews.filter(r => r.tutorId === tutorId), newRev];
+    const avgRating = Number((tutorRevs.reduce((acc, r) => acc + r.rating, 0) / tutorRevs.length).toFixed(1));
+
+    updateUserProfile(tutorId, {
+      rating: avgRating,
+      reviewCount: tutorRevs.length
+    });
+
+    addNotification(
+      tutorId,
+      'New Student Review ⭐',
+      `${currentUser.fullName} left you a ${rating}-star review for ${subject}: "${comment.substring(0, 50)}..."`,
+      'system'
+    );
+  };
+
+  // Messaging functions
+  const getOrCreateChat = (
+    studentId: string,
+    tutorId: string,
+    studentName: string,
+    tutorName: string,
+    studentAvatar?: string,
+    tutorAvatar?: string
+  ) => {
+    let existing = chats.find(c => 
+      (c.studentId === studentId && c.tutorId === tutorId) ||
+      (c.studentId === tutorId && c.tutorId === studentId)
+    );
+    if (!existing) {
+      existing = {
+        id: `chat_${Date.now()}`,
+        studentId,
+        studentName,
+        studentAvatar,
+        tutorId,
+        tutorName,
+        tutorAvatar,
+        lastMessage: 'Chat conversation started.',
+        lastMessageTime: 'Just now',
+        unreadCount: 0
+      };
+      setChats(prev => [existing!, ...prev]);
+      try { setDoc(doc(db, 'chats', existing.id), existing).catch(e => console.warn('Firestore chat write:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+    }
+    return existing;
+  };
+
+  const sendMessage = (chatId: string, recipientId: string, content: string) => {
+    if (!currentUser) return;
+
+    const chat = chats.find(c => c.id === chatId);
+    if (!chat) return;
+
+    const newMsg: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      chatId,
+      senderId: currentUser.id,
+      senderName: currentUser.fullName,
+      senderRole: currentUser.role,
+      recipientId,
+      content,
+      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      isRead: false
+    };
+
+    setMessages(prev => [...prev, newMsg]);
+    try { setDoc(doc(db, 'messages', newMsg.id), newMsg).catch(e => console.warn('Firestore message write:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+
+    const updatedChat = {
+      ...chat,
+      lastMessage: content,
+      lastMessageTime: 'Just now',
+      unreadCount: chat.unreadCount + 1
+    };
+    setChats(prev => prev.map(c => c.id === chatId ? updatedChat : c));
+    try { setDoc(doc(db, 'chats', chatId), updatedChat, { merge: true }).catch(e => console.warn('Firestore chat update:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+
+    addNotification(
+      recipientId,
+      `New Message from ${currentUser.fullName}`,
+      content.length > 40 ? `${content.substring(0, 40)}...` : content,
+      'chat'
+    );
+  };
+
+  const markChatAsRead = (chatId: string) => {
+    setChats(prev => prev.map(c => {
+      if (c.id === chatId) {
+        const updated = { ...c, unreadCount: 0 };
+        try { setDoc(doc(db, 'chats', chatId), updated, { merge: true }).catch(e => console.warn('Firestore chat mark read:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+        return updated;
+      }
+      return c;
+    }));
+    setMessages(prev => prev.map(m => {
+      if (m.chatId === chatId) {
+        const updated = { ...m, isRead: true };
+        try { setDoc(doc(db, 'messages', m.id), updated, { merge: true }).catch(e => console.warn('Firestore msg mark read:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+        return updated;
+      }
+      return m;
+    }));
+  };
+
+  const markNotifAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => {
+      if (n.id === id) {
+        const updated = { ...n, isRead: true };
+        try { setDoc(doc(db, 'notifications', id), updated, { merge: true }).catch(e => console.warn('Firestore notif mark read:', e)); } catch (e) { console.warn('Firestore notice:', e); }
+        return updated;
+      }
+      return n;
+    }));
+  };
+
+  const clearAllNotifs = () => {
+    setNotifications([]);
+  };
+
+  // Admin Portal Actions
+  const approveTutorVerification = (tutorId: string) => {
+    updateUserProfile(tutorId, {
+      status: 'active',
+      isVerifiedTutor: true
+    });
+
+    const targetUser = users.find(u => u.id === tutorId);
+    if (targetUser) {
+      addNotification(
+        tutorId,
+        'Tutor Profile Verified! 🎉',
+        'Congratulations! LearnLink Admin approved your credentials. You can now accept student booking requests and earn.',
+        'verification'
+      );
+
+      addSimulatedEmail(
+        targetUser.email,
+        targetUser.fullName,
+        '[LearnLink Admin] Your Tutor Verification Has Been Approved!',
+        `Dumela ${targetUser.fullName},\n\nWe are excited to inform you that your tutor verification application has been approved by LearnLink Admin.\n\nYour profile now displays the Verified Educator Badge, and students across Botswana can book sessions with you.\n\nWelcome to LearnLink!`,
+        'tutor_approved'
+      );
+    }
+  };
+
+  const rejectTutorVerification = (tutorId: string, reason: string) => {
+    updateUserProfile(tutorId, {
+      status: 'suspended',
+      isVerifiedTutor: false
+    });
+
+    addNotification(
+      tutorId,
+      'Verification Application Rejected',
+      `Your verification request was rejected. Reason: ${reason}`,
+      'verification'
+    );
+  };
+
+  const suspendUserAccount = (userId: string) => {
+    updateUserProfile(userId, { status: 'suspended' });
+  };
+
+  const activateUserAccount = (userId: string) => {
+    updateUserProfile(userId, { status: 'active' });
+  };
+
+  const closeUserAccount = (userId: string) => {
+    // Soft remove user sessions & update user status
+    updateUserProfile(userId, { status: 'suspended' });
+  };
+
+  return (
+    <AppContext.Provider
+      value={{
+        sessions,
+        transactions,
+        notifications,
+        chats,
+        messages,
+        reviews,
+        emails,
+        createBooking,
+        updateSessionStatus,
+        rescheduleSession,
+        completeSessionAndReleaseEscrow,
+        addReview,
+        sendMessage,
+        getOrCreateChat,
+        markChatAsRead,
+        markNotifAsRead,
+        clearAllNotifs,
+        approveTutorVerification,
+        rejectTutorVerification,
+        suspendUserAccount,
+        activateUserAccount,
+        closeUserAccount,
+        searchQuery,
+        setSearchQuery,
+        selectedSubject,
+        setSelectedSubject,
+        selectedLevel,
+        setSelectedLevel,
+        selectedLocation,
+        setSelectedLocation,
+        priceRange,
+        setPriceRange,
+        isEmailDrawerOpen,
+        setIsEmailDrawerOpen,
+        isShortcutsModalOpen,
+        setIsShortcutsModalOpen,
+        activeChatUser,
+        setActiveChatUser,
+        activeDailySession,
+        setActiveDailySession
+      }}
+    >
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+export const useApp = () => {
+  const context = useContext(AppContext);
+  if (!context) {
+    throw new Error('useApp must be used within an AppProvider');
+  }
+  return context;
+};
