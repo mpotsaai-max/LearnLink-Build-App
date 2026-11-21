@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">LearnLink</string>
+    <string name="title_activity_main">LearnLink</string>
+    <string name="package_name">com.mpotsaai.learnlink</string>
+    <string name="custom_url_scheme">com.mpotsaai.learnlink</string>
+</resources>

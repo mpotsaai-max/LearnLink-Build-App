@@ -1,0 +1,84 @@
+rules_version = '2';
+
+// LearnLink access rules (Step 1: accounts, roles, public tutor cards)
+// Everything not listed here stays locked (deny-all), including bookings, chats,
+// payments and reviews, until those are moved to the database in the next step.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+    // Admins are listed in the "admins" collection. Only you can edit it, in the Firebase console.
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Admin list: a person may only check whether THEY are on it. Nobody can change it from the app.
+    match /admins/{uid} {
+      allow get: if isOwner(uid);
+      allow list, create, update, delete: if false;
+    }
+
+    // Public tutor cards (shown in the directory to everyone, even visitors).
+    // Only an admin can publish or remove a card. A verified tutor can edit their own safe fields.
+    match /tutors/{uid} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isOwner(uid)
+        && resource.data.isVerifiedTutor == true
+        && changedKeys().hasOnly([
+          'fullName', 'avatarUrl', 'bio', 'qualifications', 'university', 'courseOrMajor',
+          'collegeOrUniversity', 'yearsOfExperience', 'subjects', 'academicLevels',
+          'location', 'hourlyRatePula', 'packages'
+        ])
+      );
+    }
+
+    // Private profiles (email, phone, documents): the owner and admins only.
+    match /users/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+
+      // A new account can only start as a student, or as a tutor waiting for approval.
+      allow create: if isOwner(uid)
+        && request.resource.data.id == uid
+        && request.resource.data.email.lower() == request.auth.token.email.lower()
+        && request.resource.data.role in ['student', 'tutor']
+        && request.resource.data.isVerifiedTutor == false
+        && (
+          (request.resource.data.role == 'student' && request.resource.data.status == 'active')
+          || (request.resource.data.role == 'tutor' && request.resource.data.status == 'pending_verification')
+        )
+        && request.resource.data.get('rating', 0) == 0
+        && request.resource.data.get('reviewCount', 0) == 0
+        && request.resource.data.get('totalEarningsPula', 0) == 0;
+
+      // Owners can edit their own details but never role, status, approval, rating or earnings.
+      allow update: if isAdmin() || (
+        isOwner(uid)
+        && changedKeys().hasOnly([
+          'fullName', 'phoneNumber', 'avatarUrl', 'bio', 'qualifications', 'university',
+          'courseOrMajor', 'collegeOrUniversity', 'yearsOfExperience', 'subjects', 'academicLevels',
+          'location', 'hourlyRatePula', 'packages', 'verificationDocs', 'resumeDocUrl',
+          'academicRecordDocUrl', 'omangIdDocUrl', 'emailVerified', 'studentIdDocUrl',
+          'preferredPaymentMethod'
+        ])
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // Everything else: locked.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
